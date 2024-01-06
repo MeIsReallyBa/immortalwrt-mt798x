@@ -1,0 +1,187 @@
+--- a/include/net/netfilter/nf_conntrack_acct.h	2024-01-04 22:35:10.790631711 +0800
++++ b/include/net/netfilter/nf_conntrack_acct.h	2024-01-06 00:57:34.678787219 +0800
+@@ -14,6 +14,8 @@
+ struct nf_conn_counter {
+ 	atomic64_t packets;
+ 	atomic64_t bytes;
++	atomic64_t diff_packets;
++	atomic64_t diff_bytes;
+ };
+ 
+ struct nf_conn_acct {
+
+--- a/net/ipv4/netfilter/ip_tables.c	2024-01-01 02:04:02.972938000 +0800
++++ b/net/ipv4/netfilter/ip_tables.c	2024-01-06 01:01:49.216454646 +0800
+@@ -27,6 +27,8 @@
+ #include <linux/netfilter_ipv4/ip_tables.h>
+ #include <net/netfilter/nf_log.h>
+ #include "../../netfilter/xt_repldata.h"
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_acct.h>
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+@@ -273,6 +275,25 @@
+ 	return true;
+ }
+ 
++static struct hnat_desc {
++	u32 entry : 15;
++	u32 filled : 3;
++	u32 crsn : 5;
++	u32 resv1 : 3;
++	u32 sport : 4;
++	u32 resv2 : 1;
++	u32 alg : 1;
++	u32 iface : 8;
++	u32 wdmaid : 2;
++	u32 rxid : 2;
++	u32 wcid : 10;
++	u32 bssid : 6;
++	u32 resv5 : 20;
++	u32 magic_tag_protect : 16;
++} __packed;
++#define HIT_BIND_KEEPALIVE_DUP_OLD_HDR 0x15
++#define skb_hnat_reason(skb) (((struct hnat_desc *)(skb->head))->crsn)
++
+ /* Returns one of the generic firewall policies, like NF_ACCEPT. */
+ unsigned int
+ ipt_do_table(struct sk_buff *skb,
+@@ -291,7 +312,12 @@
+ 	const struct xt_table_info *private;
+ 	struct xt_action_param acpar;
+ 	unsigned int addend;
+-
++	
++	struct nf_conn *ct;
++	struct nf_conn_acct *acct;
++	struct nf_conn_counter *conn_counter;
++	enum ip_conntrack_info ctinfo;
++	
+ 	/* Initialization */
+ 	WARN_ON(!(table->valid_hooks & (1 << hook)));
+ 	local_bh_disable();
+@@ -302,9 +328,22 @@
+ 	e = get_entry(table_base, private->hook_entry[hook]);
+ 	if (ipt_handle_default_rule(e, &verdict)) {
+ 		struct xt_counters *counter;
+-
+ 		counter = xt_get_this_cpu_counter(&e->counters);
+ 		ADD_COUNTER(*counter, skb->len, 1);
++		
++		if (unlikely(skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct) {
++			acct = nf_conn_acct_find(ct);
++			if (acct) {
++			conn_counter = acct->counter;			
++			ADD_COUNTER(*counter, 		   	    
++ atomic64_read(&conn_counter[CTINFO2DIR(ctinfo)].diff_bytes),atomic64_read(&conn_counter[CTINFO2DIR(ctinfo)].diff_packets));
++				  }
++			}
++		}
++
++			
+ 		local_bh_enable();
+ 		return verdict;
+ 	}
+@@ -360,6 +399,17 @@
+ 
+ 		counter = xt_get_this_cpu_counter(&e->counters);
+ 		ADD_COUNTER(*counter, skb->len, 1);
++		if (unlikely(skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct) {
++			acct = nf_conn_acct_find(ct);
++			if (acct) {
++			conn_counter = acct->counter;			
++			ADD_COUNTER(*counter, 		   	    
++ atomic64_read(&conn_counter[CTINFO2DIR(ctinfo)].diff_bytes),atomic64_read(&conn_counter[CTINFO2DIR(ctinfo)].diff_packets));
++				  }
++			}
++		}
+ 
+ 		t = ipt_get_target_c(e);
+ 		WARN_ON(!t->u.kernel.target);
+
+--- a/net/ipv6/netfilter/ip6_tables.c	2023-08-30 22:27:28.000000000 +0800
++++ b/net/ipv6/netfilter/ip6_tables.c	2024-01-06 01:03:01.874087644 +0800
+@@ -31,6 +31,8 @@
+ #include <linux/netfilter/x_tables.h>
+ #include <net/netfilter/nf_log.h>
+ #include "../../netfilter/xt_repldata.h"
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_acct.h>
+ 
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+@@ -245,6 +247,25 @@
+ 	return (void *)entry + entry->next_offset;
+ }
+ 
++static struct hnat_desc {
++	u32 entry : 15;
++	u32 filled : 3;
++	u32 crsn : 5;
++	u32 resv1 : 3;
++	u32 sport : 4;
++	u32 resv2 : 1;
++	u32 alg : 1;
++	u32 iface : 8;
++	u32 wdmaid : 2;
++	u32 rxid : 2;
++	u32 wcid : 10;
++	u32 bssid : 6;
++	u32 resv5 : 20;
++	u32 magic_tag_protect : 16;
++} __packed;
++#define HIT_BIND_KEEPALIVE_DUP_OLD_HDR 0x15
++#define skb_hnat_reason(skb) (((struct hnat_desc *)(skb->head))->crsn)
++
+ /* Returns one of the generic firewall policies, like NF_ACCEPT. */
+ unsigned int
+ ip6t_do_table(struct sk_buff *skb,
+@@ -262,7 +283,12 @@
+ 	const struct xt_table_info *private;
+ 	struct xt_action_param acpar;
+ 	unsigned int addend;
+-
++	
++	struct nf_conn *ct;
++	struct nf_conn_acct *acct;
++	struct nf_conn_counter *conn_counter;
++	enum ip_conntrack_info ctinfo;
++	
+ 	/* Initialization */
+ 	stackidx = 0;
+ 	indev = state->in ? state->in->name : nulldevname;
+@@ -285,6 +311,7 @@
+ 	cpu        = smp_processor_id();
+ 	table_base = private->entries;
+ 	jumpstack  = (struct ip6t_entry **)private->jumpstack[cpu];
++	
+ 
+ 	/* Switch to alternate jumpstack if we're being invoked via TEE.
+ 	 * TEE issues XT_CONTINUE verdict on original skb so we must not
+@@ -321,7 +348,20 @@
+ 
+ 		counter = xt_get_this_cpu_counter(&e->counters);
+ 		ADD_COUNTER(*counter, skb->len, 1);
++		
++		if (unlikely(skb_hnat_reason(skb) == HIT_BIND_KEEPALIVE_DUP_OLD_HDR)){
++		ct = nf_ct_get(skb, &ctinfo);
++		if (ct) {
++			acct = nf_conn_acct_find(ct);
++			if (acct) {
++			conn_counter = acct->counter;			
++			ADD_COUNTER(*counter, 		   	    
++ atomic64_read(&conn_counter[CTINFO2DIR(ctinfo)].diff_bytes),atomic64_read(&conn_counter[CTINFO2DIR(ctinfo)].diff_packets));
++				  }
++			}
++		}
+ 
++			
+ 		t = ip6t_get_target_c(e);
+ 		WARN_ON(!t->u.kernel.target);
+ 
+
